@@ -459,18 +459,74 @@ def test_embed():
     if not HF_API_KEY:
         return jsonify({'error': 'HF_API_KEY not set'})
     
-    test_text = ["Hello world", "This is a test"]
-    embeddings = get_embeddings(test_text)
+    # Test with HuggingFace directly
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    test_input = "Hello world"
     
-    if embeddings:
+    try:
+        response = requests.post(
+            HF_EMBED_URL, 
+            headers=headers, 
+            json={"inputs": test_input, "options": {"wait_for_model": True}},
+            timeout=30
+        )
+        
+        result = response.json()
+        
+        return jsonify({
+            'success': response.status_code == 200,
+            'status_code': response.status_code,
+            'raw_result_type': str(type(result)),
+            'raw_result_sample': str(result)[:500],
+            'is_list': isinstance(result, list),
+            'length': len(result) if isinstance(result, list) else 'N/A',
+            'first_element_type': str(type(result[0])) if isinstance(result, list) and len(result) > 0 else 'N/A',
+            'first_5_values': result[:5] if isinstance(result, list) else 'N/A'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/debug-upload', methods=['POST'])
+def debug_upload():
+    """Debug version of upload that shows detailed info"""
+    if 'pdf' not in request.files:
+        return jsonify({'error': 'No file'})
+    
+    file = request.files['pdf']
+    
+    try:
+        # Read PDF
+        file_bytes = file.read()
+        text = read_pdf_from_bytes(file_bytes)
+        
+        if not text:
+            return jsonify({'error': 'No text extracted'})
+        
+        # Create just 2 chunks for testing
+        chunks = split_text_simple(text, chunk_size=500)[:2]
+        
+        # Get embeddings
+        embeddings = get_embeddings(chunks)
+        
+        if not embeddings:
+            return jsonify({'error': 'Failed to get embeddings', 'chunks': chunks})
+        
         return jsonify({
             'success': True,
+            'num_chunks': len(chunks),
             'num_embeddings': len(embeddings),
-            'embedding_length': len(embeddings[0]) if embeddings else 0,
-            'sample': embeddings[0][:5] if embeddings else []
+            'embedding_0_type': str(type(embeddings[0])),
+            'embedding_0_length': len(embeddings[0]) if isinstance(embeddings[0], list) else 'N/A',
+            'embedding_0_sample': str(embeddings[0][:5]) if isinstance(embeddings[0], list) else str(embeddings[0])[:100],
+            'chunks_preview': [c[:100] for c in chunks]
         })
-    else:
-        return jsonify({'success': False, 'error': 'Failed to get embeddings'})
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
 
 # For local testing
 if __name__ == '__main__':
