@@ -466,11 +466,8 @@ def test_embed():
         return jsonify({
             'success': True,
             'num_embeddings': len(embeddings),
-            'embedding_type': str(type(embeddings[0])),
-            'embedding_length': len(embeddings[0]) if isinstance(embeddings[0], list) else 0,
-            'first_5_values': embeddings[0][:5] if isinstance(embeddings[0], list) else embeddings[0],
-            'is_list': isinstance(embeddings[0], list),
-            'is_all_numbers': all(isinstance(x, (int, float)) for x in embeddings[0][:5]) if isinstance(embeddings[0], list) else False
+            'embedding_length': len(embeddings[0]) if embeddings else 0,
+            'sample': embeddings[0][:5] if embeddings else []
         })
     else:
         return jsonify({'success': False, 'error': 'Failed to get embeddings'})
@@ -478,4 +475,4 @@ def test_embed():
 # For local testing
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(debug=True, host='0.0.0.0', port=port)
