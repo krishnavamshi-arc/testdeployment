@@ -1,0 +1,331 @@
+{% extends "base.html" %} {% block title %}RAG PDF Q&A - Gemini + Qdrant{%
+endblock %} {% block content %}
+<div class="main-container">
+  <!-- Header -->
+  <div class="header-section">
+    <h1><i class="bi bi-book-half"></i> RAG-based PDF Q&A</h1>
+    <p class="subtitle">
+      Upload a PDF manual and ask questions. Uses Qdrant vector DB + Google
+      Gemini AI.
+    </p>
+  </div>
+
+  <!-- Flash Messages -->
+  {% with messages = get_flashed_messages(with_categories=true) %} {% if
+  messages %} {% for category, message in messages %}
+  <div
+    class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show"
+    role="alert"
+  >
+    <i
+      class="bi bi-{{ 'exclamation-triangle' if category == 'error' else 'check-circle' }}"
+    ></i>
+    {{ message }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endfor %} {% endif %} {% endwith %}
+
+  <div class="row">
+    <!-- Sidebar -->
+    <div class="col-md-4">
+      <div class="sidebar">
+        <h5><i class="bi bi-gear"></i> Settings</h5>
+
+        <!-- Qdrant Status -->
+        <div class="mb-3">
+          <div
+            class="status-badge {{ 'status-connected' if qdrant_status == 'connected' else 'status-disconnected' }}"
+          >
+            <i
+              class="bi bi-{{ 'check-circle-fill' if qdrant_status == 'connected' else 'x-circle-fill' }}"
+            ></i>
+            Qdrant {{ qdrant_status|title }}
+          </div>
+          {% if qdrant_status == 'connected' %}
+          <small class="text-muted d-block"
+            >Collections: {{ num_collections }}</small
+          >
+          {% endif %}
+        </div>
+
+        <!-- Current Collection Info -->
+        {% if collection_name %}
+        <div class="metric-card">
+          <h6>Active Collection</h6>
+          <div class="value">{{ num_chunks }}</div>
+          <small>Chunks Indexed</small>
+        </div>
+        <div class="alert alert-info" style="font-size: 0.85rem">
+          <strong>Collection:</strong><br />
+          <code style="font-size: 0.75rem">{{ collection_name }}</code>
+        </div>
+        {% endif %}
+
+        <hr />
+
+        <!-- Upload Form -->
+        <h5><i class="bi bi-sliders"></i> Parameters</h5>
+        <form
+          id="uploadForm"
+          action="{{ url_for('upload_file') }}"
+          method="post"
+          enctype="multipart/form-data"
+        >
+          <div class="mb-3">
+            <label class="form-label">Chunk Size</label>
+            <input
+              type="range"
+              class="form-range"
+              name="chunk_size"
+              id="chunk_size"
+              min="300"
+              max="1200"
+              step="50"
+              value="600"
+            />
+            <small class="text-muted"
+              ><span id="chunk_size_value">600</span> characters</small
+            >
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Chunk Overlap</label>
+            <input
+              type="range"
+              class="form-range"
+              name="chunk_overlap"
+              id="chunk_overlap"
+              min="0"
+              max="300"
+              step="10"
+              value="120"
+            />
+            <small class="text-muted"
+              ><span id="chunk_overlap_value">120</span> characters</small
+            >
+          </div>
+        </form>
+
+        <hr />
+
+        <!-- Query Parameters -->
+        <form id="queryParams">
+          <div class="mb-3">
+            <label class="form-label">Top-K Retrieval</label>
+            <input
+              type="range"
+              class="form-range"
+              name="top_k"
+              id="top_k"
+              min="1"
+              max="10"
+              step="1"
+              value="5"
+            />
+            <small class="text-muted"
+              ><span id="top_k_value">5</span> chunks</small
+            >
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Temperature</label>
+            <input
+              type="range"
+              class="form-range"
+              name="temperature"
+              id="temperature"
+              min="0"
+              max="1"
+              step="0.1"
+              value="0.3"
+            />
+            <small class="text-muted"
+              ><span id="temperature_value">0.3</span></small
+            >
+          </div>
+        </form>
+
+        <hr />
+
+        <div class="alert alert-info" style="font-size: 0.85rem">
+          <i class="bi bi-lightbulb"></i> <strong>Tip:</strong> Tune chunk size
+          and overlap for best retrieval quality.
+        </div>
+
+        {% if collection_name %}
+        <form action="{{ url_for('reset') }}" method="post">
+          <button type="submit" class="btn btn-danger w-100">
+            <i class="bi bi-arrow-clockwise"></i> Reset Session
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="col-md-8">
+      <!-- Upload Section -->
+      {% if not collection_name %}
+      <div class="upload-section">
+        <div class="upload-icon">
+          <i class="bi bi-cloud-upload"></i>
+        </div>
+        <h4>Upload Your PDF Document</h4>
+        <p class="text-muted">Select a PDF file to begin asking questions</p>
+        <input
+          type="file"
+          class="form-control mt-3"
+          name="pdf"
+          accept=".pdf"
+          form="uploadForm"
+          required
+        />
+        <button type="submit" class="btn btn-primary mt-3" form="uploadForm">
+          <i class="bi bi-upload"></i> Upload & Process
+        </button>
+      </div>
+
+      <div class="example-questions">
+        <h5><i class="bi bi-lightbulb"></i> Example Questions</h5>
+        <ul>
+          <li>What is the main topic of this document?</li>
+          <li>Can you summarize the key points?</li>
+          <li>What does the document say about [specific topic]?</li>
+          <li>Are there any recommendations mentioned?</li>
+        </ul>
+      </div>
+      {% else %}
+      <!-- Query Section -->
+      <div class="query-section">
+        <h4><i class="bi bi-search"></i> Ask a Question</h4>
+        <form
+          action="{{ url_for('ask_question') }}"
+          method="post"
+          id="questionForm"
+        >
+          <div class="mb-3">
+            <input
+              type="text"
+              class="form-control form-control-lg"
+              name="query"
+              placeholder="Enter your question here..."
+              required
+              value="{{ session.get('last_query', '') }}"
+            />
+          </div>
+
+          <!-- Hidden fields for parameters -->
+          <input type="hidden" name="top_k" id="hidden_top_k" value="5" />
+          <input
+            type="hidden"
+            name="temperature"
+            id="hidden_temperature"
+            value="0.3"
+          />
+
+          <button type="submit" class="btn btn-primary btn-lg w-100">
+            <i class="bi bi-robot"></i> Ask Question
+          </button>
+        </form>
+      </div>
+
+      <!-- Answer Section -->
+      {% if session.get('last_answer') %}
+      <div class="answer-box">
+        <h5><i class="bi bi-lightbulb-fill"></i> Answer</h5>
+        <p>{{ session.get('last_answer') }}</p>
+      </div>
+
+      <!-- Sources Section -->
+      {% if session.get('last_contexts') %}
+      <div class="mt-4">
+        <h5><i class="bi bi-file-text"></i> Sources (Retrieved from Qdrant)</h5>
+        <div class="accordion" id="sourcesAccordion">
+          {% for context in session.get('last_contexts', []) %}
+          <div class="context-item">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <strong>Chunk {{ loop.index }}</strong>
+              <span class="relevance-badge">
+                Relevance: {{ "%.3f"|format(context.score) }}
+              </span>
+            </div>
+            <p class="mb-0 text-muted" style="font-size: 0.9rem">
+              {{ context.text[:800] }}{% if context.text|length > 800 %}...{%
+              endif %}
+            </p>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %} {% endif %}
+
+      <!-- Upload New Document -->
+      <div class="mt-4">
+        <details>
+          <summary class="btn btn-outline-secondary w-100">
+            <i class="bi bi-plus-circle"></i> Upload New Document
+          </summary>
+          <div class="upload-section mt-3">
+            <input
+              type="file"
+              class="form-control"
+              name="pdf"
+              accept=".pdf"
+              form="uploadForm"
+              required
+            />
+            <button
+              type="submit"
+              class="btn btn-primary mt-3"
+              form="uploadForm"
+            >
+              <i class="bi bi-upload"></i> Upload & Process
+            </button>
+          </div>
+        </details>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <hr class="mt-5" />
+  <footer class="text-center text-muted">
+    <small
+      >Built with Flask, Qdrant, Sentence Transformers, and Google Gemini
+      AI</small
+    >
+  </footer>
+</div>
+
+{% endblock %} {% block scripts %}
+<script>
+  // Update range slider values
+  document.querySelectorAll('input[type="range"]').forEach((slider) => {
+    const valueSpan = document.getElementById(slider.id + "_value");
+
+    slider.addEventListener("input", function () {
+      valueSpan.textContent = this.value;
+
+      // Update hidden fields for query form
+      if (this.id === "top_k" || this.id === "temperature") {
+        const hiddenField = document.getElementById("hidden_" + this.id);
+        if (hiddenField) {
+          hiddenField.value = this.value;
+        }
+      }
+    });
+  });
+
+  // Form submission loading state
+  document.querySelectorAll("form").forEach((form) => {
+    form.addEventListener("submit", function () {
+      const submitBtn = this.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML =
+          '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
+      }
+    });
+  });
+</script>
+{% endblock %}
