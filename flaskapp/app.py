@@ -464,6 +464,9 @@ def test_embed():
     test_input = "Hello world"
     
     try:
+        print(f"Testing HuggingFace API with URL: {HF_EMBED_URL}")
+        print(f"API Key (first 10 chars): {HF_API_KEY[:10]}...")
+        
         response = requests.post(
             HF_EMBED_URL, 
             headers=headers, 
@@ -471,20 +474,42 @@ def test_embed():
             timeout=30
         )
         
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text[:500]}")
+        
+        if response.status_code != 200:
+            return jsonify({
+                'success': False,
+                'status_code': response.status_code,
+                'error_message': response.text,
+                'url_used': HF_EMBED_URL,
+                'api_key_set': bool(HF_API_KEY),
+                'api_key_prefix': HF_API_KEY[:7] if HF_API_KEY else 'None'
+            })
+        
         result = response.json()
+        print(f"Result type: {type(result)}")
+        print(f"Result sample: {str(result)[:200]}")
         
         return jsonify({
-            'success': response.status_code == 200,
+            'success': True,
             'status_code': response.status_code,
-            'raw_result_type': str(type(result)),
-            'raw_result_sample': str(result)[:500],
+            'result_type': str(type(result)),
             'is_list': isinstance(result, list),
             'length': len(result) if isinstance(result, list) else 'N/A',
             'first_element_type': str(type(result[0])) if isinstance(result, list) and len(result) > 0 else 'N/A',
-            'first_5_values': result[:5] if isinstance(result, list) else 'N/A'
+            'first_5_values': result[:5] if isinstance(result, list) else str(result)[:200],
+            'result_sample': str(result)[:500]
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        import traceback
+        return jsonify({
+            'success': False, 
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'hf_url': HF_EMBED_URL,
+            'api_key_set': bool(HF_API_KEY)
+        })
 
 @app.route('/debug-upload', methods=['POST'])
 def debug_upload():
@@ -530,5 +555,9 @@ def debug_upload():
 
 # For local testing
 if __name__ == '__main__':
+    print("Available routes:")
+    for rule in app.url_map.iter_rules():
+        print(f"  {rule.endpoint}: {rule.rule}")
+    
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
