@@ -37,7 +37,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-HF_EMBED_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+HF_EMBED_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
 
 # Initialize Qdrant (lazy loading)
 _qdrant_client = None
@@ -55,8 +55,8 @@ def get_qdrant_client():
 # ----------------------------
 # Helper Functions
 # ----------------------------
-def get_embeddings(texts):
-    """Get embeddings from HuggingFace API"""
+def get_embeddings(texts, max_retries=3):
+    """Get embeddings from HuggingFace API with retries"""
     if not HF_API_KEY:
         print("HF_API_KEY not set")
         return None
@@ -64,52 +64,70 @@ def get_embeddings(texts):
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     embeddings = []
     
-    # Process in smaller batches
-    batch_size = 5
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
+    for text_idx, text in enumerate(texts):
+        retry_count = 0
+        success = False
         
-        for text in batch:
+        while retry_count < max_retries and not success:
             try:
                 # Clean and limit text
                 clean = text.strip()[:500]
                 if not clean:
+                    embeddings.append([0.0] * 384)  # Dummy embedding for empty text
+                    success = True
                     continue
+                
+                print(f"Getting embedding {text_idx + 1}/{len(texts)}, attempt {retry_count + 1}")
                     
                 response = requests.post(
                     HF_EMBED_URL, 
                     headers=headers, 
                     json={"inputs": clean, "options": {"wait_for_model": True}},
-                    timeout=30
+                    timeout=60  # Longer timeout
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
-                    embeddings.append(result)
-                elif response.status_code == 503:
-                    # Model loading, wait and retry
-                    print("Model loading, waiting...")
-                    import time
-                    time.sleep(2)
-                    response = requests.post(
-                        HF_EMBED_URL, 
-                        headers=headers, 
-                        json={"inputs": clean, "options": {"wait_for_model": True}},
-                        timeout=30
-                    )
-                    if response.status_code == 200:
-                        embeddings.append(response.json())
+                    # Validate result is a list of numbers
+                    if isinstance(result, list) and len(result) > 0:
+                        if isinstance(result[0], (int, float)):
+                            embeddings.append(result)
+                            success = True
+                            print(f"✓ Embedding {text_idx + 1} successful (length: {len(result)})")
+                        else:
+                            print(f"Invalid embedding format: {type(result[0])}")
+                            retry_count += 1
                     else:
-                        print(f"HF Error after retry: {response.status_code} - {response.text}")
-                        return None
-                else:
-                    print(f"HF Error: {response.status_code} - {response.text}")
+                        print(f"Invalid result type: {type(result)}")
+                        retry_count += 1
+                        
+                elif response.status_code == 503:
+                    # Model loading
+                    print(f"Model loading (503), waiting 5 seconds... (attempt {retry_count + 1})")
+                    import time
+                    time.sleep(5)
+                    retry_count += 1
+                    
+                elif response.status_code == 401:
+                    print(f"Authentication error (401) - Invalid API key")
                     return None
+                    
+                else:
+                    print(f"HF Error: {response.status_code} - {response.text[:200]}")
+                    retry_count += 1
+                    
             except Exception as e:
                 print(f"Embedding error: {e}")
-                return None
+                retry_count += 1
+                if retry_count < max_retries:
+                    import time
+                    time.sleep(2)
+        
+        if not success:
+            print(f"Failed to get embedding {text_idx + 1} after {max_retries} attempts")
+            return None
     
-    print(f"Generated {len(embeddings)} embeddings")
+    print(f"✓ Successfully generated {len(embeddings)} embeddings")
     return embeddings if embeddings else None
 
 def clean_text(text: str) -> str:
@@ -186,6 +204,8 @@ def index_chunks(chunks: list, collection_name: str):
         print("Failed to get embeddings")
         return False
     
+    print(f"Got {len(embeddings)} embeddings, expected {len(chunks)}")
+    
     if len(embeddings) != len(chunks):
         print(f"Embedding count mismatch: {len(embeddings)} vs {len(chunks)}")
         return False
@@ -193,9 +213,21 @@ def index_chunks(chunks: list, collection_name: str):
     try:
         points = []
         for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            # Debug: check embedding structure
+            print(f"Chunk {idx}: embedding type={type(embedding)}, len={len(embedding) if isinstance(embedding, list) else 'N/A'}")
+            
             # Validate embedding is a list of numbers
-            if not isinstance(embedding, list) or len(embedding) == 0:
-                print(f"Invalid embedding at index {idx}")
+            if not isinstance(embedding, list):
+                print(f"ERROR: Embedding at index {idx} is not a list, it's {type(embedding)}")
+                return False
+            
+            if len(embedding) == 0:
+                print(f"ERROR: Embedding at index {idx} is empty")
+                return False
+            
+            # Check if all elements are numbers
+            if not all(isinstance(x, (int, float)) for x in embedding[:5]):  # Check first 5
+                print(f"ERROR: Embedding at index {idx} contains non-numeric values")
                 return False
             
             points.append(PointStruct(
@@ -204,9 +236,9 @@ def index_chunks(chunks: list, collection_name: str):
                 payload={"text": chunk, "chunk_index": idx}
             ))
         
-        print(f"Upserting {len(points)} points to Qdrant...")
+        print(f"✓ Created {len(points)} points, now upserting to Qdrant...")
         client.upsert(collection_name=collection_name, points=points)
-        print("Successfully indexed to Qdrant")
+        print("✓ Successfully indexed to Qdrant")
         return True
     except Exception as e:
         print(f"Index error: {e}")
@@ -434,8 +466,11 @@ def test_embed():
         return jsonify({
             'success': True,
             'num_embeddings': len(embeddings),
-            'embedding_length': len(embeddings[0]) if embeddings else 0,
-            'sample': embeddings[0][:5] if embeddings else []
+            'embedding_type': str(type(embeddings[0])),
+            'embedding_length': len(embeddings[0]) if isinstance(embeddings[0], list) else 0,
+            'first_5_values': embeddings[0][:5] if isinstance(embeddings[0], list) else embeddings[0],
+            'is_list': isinstance(embeddings[0], list),
+            'is_all_numbers': all(isinstance(x, (int, float)) for x in embeddings[0][:5]) if isinstance(embeddings[0], list) else False
         })
     else:
         return jsonify({'success': False, 'error': 'Failed to get embeddings'})
@@ -443,4 +478,4 @@ def test_embed():
 # For local testing
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=False, host='0.0.0.0', port=port)
