@@ -58,29 +58,59 @@ def get_qdrant_client():
 def get_embeddings(texts):
     """Get embeddings from HuggingFace API"""
     if not HF_API_KEY:
+        print("HF_API_KEY not set")
         return None
         
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     embeddings = []
     
-    for text in texts:
-        try:
-            response = requests.post(
-                HF_EMBED_URL, 
-                headers=headers, 
-                json={"inputs": text[:500]},  # Limit input length
-                timeout=20
-            )
-            if response.status_code == 200:
-                embeddings.append(response.json())
-            else:
-                print(f"HF Error: {response.status_code}")
+    # Process in smaller batches
+    batch_size = 5
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        
+        for text in batch:
+            try:
+                # Clean and limit text
+                clean = text.strip()[:500]
+                if not clean:
+                    continue
+                    
+                response = requests.post(
+                    HF_EMBED_URL, 
+                    headers=headers, 
+                    json={"inputs": clean, "options": {"wait_for_model": True}},
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    embeddings.append(result)
+                elif response.status_code == 503:
+                    # Model loading, wait and retry
+                    print("Model loading, waiting...")
+                    import time
+                    time.sleep(2)
+                    response = requests.post(
+                        HF_EMBED_URL, 
+                        headers=headers, 
+                        json={"inputs": clean, "options": {"wait_for_model": True}},
+                        timeout=30
+                    )
+                    if response.status_code == 200:
+                        embeddings.append(response.json())
+                    else:
+                        print(f"HF Error after retry: {response.status_code} - {response.text}")
+                        return None
+                else:
+                    print(f"HF Error: {response.status_code} - {response.text}")
+                    return None
+            except Exception as e:
+                print(f"Embedding error: {e}")
                 return None
-        except Exception as e:
-            print(f"Embedding error: {e}")
-            return None
     
-    return embeddings
+    print(f"Generated {len(embeddings)} embeddings")
+    return embeddings if embeddings else None
 
 def clean_text(text: str) -> str:
     if not text:
@@ -146,25 +176,42 @@ def create_collection(collection_name: str):
 def index_chunks(chunks: list, collection_name: str):
     client = get_qdrant_client()
     if not client:
+        print("Qdrant client not available")
         return False
+    
+    print(f"Indexing {len(chunks)} chunks...")
     
     embeddings = get_embeddings(chunks)
     if not embeddings:
+        print("Failed to get embeddings")
+        return False
+    
+    if len(embeddings) != len(chunks):
+        print(f"Embedding count mismatch: {len(embeddings)} vs {len(chunks)}")
         return False
     
     try:
         points = []
         for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            # Validate embedding is a list of numbers
+            if not isinstance(embedding, list) or len(embedding) == 0:
+                print(f"Invalid embedding at index {idx}")
+                return False
+            
             points.append(PointStruct(
                 id=str(uuid.uuid4()),
                 vector=embedding,
                 payload={"text": chunk, "chunk_index": idx}
             ))
         
+        print(f"Upserting {len(points)} points to Qdrant...")
         client.upsert(collection_name=collection_name, points=points)
+        print("Successfully indexed to Qdrant")
         return True
     except Exception as e:
         print(f"Index error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def search_qdrant(collection_name: str, query: str, top_k: int = 5):
@@ -267,13 +314,19 @@ def upload_file():
         return redirect(url_for('index'))
     
     try:
+        print(f"Processing file: {file.filename}")
+        
         # Read PDF in memory
         file_bytes = file.read()
+        print(f"File size: {len(file_bytes)} bytes")
+        
         text = read_pdf_from_bytes(file_bytes)
         
         if not text:
             flash('Could not extract text from PDF', 'error')
             return redirect(url_for('index'))
+        
+        print(f"Extracted text length: {len(text)} chars")
         
         # Split into chunks
         chunk_size = int(request.form.get('chunk_size', 500))
@@ -283,21 +336,34 @@ def upload_file():
             flash('No text chunks created', 'error')
             return redirect(url_for('index'))
         
+        print(f"Created {len(chunks)} chunks")
+        
+        # Limit chunks for free tier
+        if len(chunks) > 20:
+            chunks = chunks[:20]
+            flash(f'Processing first 20 chunks only (free tier limit)', 'warning')
+        
         # Create collection and index
         safe_name = secure_filename(file.filename).replace('.pdf', '').replace('.', '_')
         collection_name = f"pdf_{safe_name}_{hash(file.filename) % 10000}"
         
+        print(f"Creating collection: {collection_name}")
+        
         if create_collection(collection_name):
+            print("Collection created, starting indexing...")
             if index_chunks(chunks, collection_name):
                 session['collection_name'] = collection_name
                 session['num_chunks'] = len(chunks)
                 flash(f'Successfully indexed {len(chunks)} chunks!', 'success')
             else:
-                flash('Error indexing chunks', 'error')
+                flash('Error indexing chunks. Please check: 1) HuggingFace API key is valid, 2) Model is loaded, 3) Try again in a moment', 'error')
         else:
-            flash('Error creating collection', 'error')
+            flash('Error creating collection. Check Qdrant connection.', 'error')
             
     except Exception as e:
+        print(f"Upload error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         flash(f'Error processing PDF: {str(e)}', 'error')
     
     return redirect(url_for('index'))
@@ -354,6 +420,25 @@ def health():
         'hf_configured': bool(HF_API_KEY),
         'gemini_configured': bool(GEMINI_API_KEY)
     })
+
+@app.route('/test-embed')
+def test_embed():
+    """Test endpoint to verify embeddings work"""
+    if not HF_API_KEY:
+        return jsonify({'error': 'HF_API_KEY not set'})
+    
+    test_text = ["Hello world", "This is a test"]
+    embeddings = get_embeddings(test_text)
+    
+    if embeddings:
+        return jsonify({
+            'success': True,
+            'num_embeddings': len(embeddings),
+            'embedding_length': len(embeddings[0]) if embeddings else 0,
+            'sample': embeddings[0][:5] if embeddings else []
+        })
+    else:
+        return jsonify({'success': False, 'error': 'Failed to get embeddings'})
 
 # For local testing
 if __name__ == '__main__':
