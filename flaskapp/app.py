@@ -371,7 +371,7 @@ def build_prompt(query: str, contexts: list):
     return (
         f"Context from document:\n{ctx_text}\n\n"
         f"Question: {query}\n\n"
-        f"Answer based context above and elaborate a little for better understanding for the user. Be concise.\n\n"
+        f"Answer based context above and elaborate a little for better understanding for the user. If requires go beyond the context and provide insights.\n\n"
         f"Answer:"
     )
 
@@ -646,4 +646,5 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
+
 
