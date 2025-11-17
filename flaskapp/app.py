@@ -37,7 +37,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-HF_EMBED_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en"
 
 # Initialize Qdrant (lazy loading)
 _qdrant_client = None
@@ -561,3 +561,4 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
+
