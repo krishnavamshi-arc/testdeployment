@@ -61,7 +61,10 @@ def get_embeddings(texts, max_retries=3):
         print("HF_API_KEY not set")
         return None
         
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json"
+    }
     embeddings = []
     
     for text_idx, text in enumerate(texts):
@@ -73,58 +76,85 @@ def get_embeddings(texts, max_retries=3):
                 # Clean and limit text
                 clean = text.strip()[:500]
                 if not clean:
-                    embeddings.append([0.0] * 384)  # Dummy embedding for empty text
+                    embeddings.append([0.0] * 384)
                     success = True
                     continue
                 
                 print(f"Getting embedding {text_idx + 1}/{len(texts)}, attempt {retry_count + 1}")
-                    
+                
+                # HuggingFace Inference API format
+                payload = {
+                    "inputs": clean,
+                    "options": {"wait_for_model": True}
+                }
+                
                 response = requests.post(
                     HF_EMBED_URL, 
                     headers=headers, 
-                    json={"inputs": clean, "options": {"wait_for_model": True}},
-                    timeout=60  # Longer timeout
+                    json=payload,
+                    timeout=60
                 )
+                
+                print(f"Response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     result = response.json()
-                    # Validate result is a list of numbers
-                    if isinstance(result, list) and len(result) > 0:
-                        if isinstance(result[0], (int, float)):
-                            embeddings.append(result)
-                            success = True
-                            print(f"✓ Embedding {text_idx + 1} successful (length: {len(result)})")
-                        else:
-                            print(f"Invalid embedding format: {type(result[0])}")
-                            retry_count += 1
+                    print(f"Result type: {type(result)}, length: {len(result) if isinstance(result, list) else 'N/A'}")
+                    
+                    # HuggingFace feature extraction returns array of shape [1, 384] or just [384]
+                    embedding = None
+                    
+                    if isinstance(result, list):
+                        if len(result) > 0:
+                            # Check structure
+                            if isinstance(result[0], (int, float)):
+                                # Flat array [0.1, 0.2, ...]
+                                embedding = result
+                                print(f"✓ Got flat embedding, length: {len(result)}")
+                            elif isinstance(result[0], list) and len(result[0]) > 0:
+                                if isinstance(result[0][0], (int, float)):
+                                    # Nested [[0.1, 0.2, ...]]
+                                    embedding = result[0]
+                                    print(f"✓ Got nested embedding, length: {len(result[0])}")
+                                elif isinstance(result[0][0], list):
+                                    # Double nested [[[0.1, ...]]]
+                                    embedding = result[0][0]
+                                    print(f"✓ Got double nested embedding, length: {len(result[0][0])}")
+                    
+                    if embedding and len(embedding) == 384:
+                        embeddings.append(embedding)
+                        success = True
+                        print(f"✓ Embedding {text_idx + 1} successful")
                     else:
-                        print(f"Invalid result type: {type(result)}")
+                        print(f"Invalid embedding: {embedding[:5] if embedding else 'None'}")
                         retry_count += 1
                         
                 elif response.status_code == 503:
-                    # Model loading
-                    print(f"Model loading (503), waiting 5 seconds... (attempt {retry_count + 1})")
+                    print(f"Model loading (503), waiting 10 seconds...")
                     import time
-                    time.sleep(5)
+                    time.sleep(10)
                     retry_count += 1
                     
-                elif response.status_code == 401:
-                    print(f"Authentication error (401) - Invalid API key")
+                elif response.status_code == 401 or response.status_code == 403:
+                    print(f"Authentication error ({response.status_code})")
+                    print(f"Response: {response.text[:200]}")
                     return None
                     
                 else:
-                    print(f"HF Error: {response.status_code} - {response.text[:200]}")
+                    print(f"HF Error {response.status_code}: {response.text[:300]}")
                     retry_count += 1
                     
             except Exception as e:
-                print(f"Embedding error: {e}")
+                print(f"Exception: {e}")
+                import traceback
+                traceback.print_exc()
                 retry_count += 1
                 if retry_count < max_retries:
                     import time
                     time.sleep(2)
         
         if not success:
-            print(f"Failed to get embedding {text_idx + 1} after {max_retries} attempts")
+            print(f"Failed after {max_retries} attempts")
             return None
     
     print(f"✓ Successfully generated {len(embeddings)} embeddings")
@@ -159,16 +189,51 @@ def read_pdf_from_bytes(file_bytes):
         return None
 
 def split_text_simple(text: str, chunk_size: int = 500):
-    """Simple text splitter - no external dependencies"""
+    """Simple text splitter - splits by characters with overlap"""
+    if not text:
+        return []
+    
     chunks = []
-    words = text.split()
+    chunk_overlap = min(100, chunk_size // 5)  # 20% overlap
     
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i + chunk_size])
-        if chunk.strip():
-            chunks.append(chunk)
+    # Split by sentences first for better coherence
+    sentences = []
+    for separator in ['. ', '! ', '? ', '\n']:
+        if separator in text:
+            parts = text.split(separator)
+            for part in parts:
+                if part.strip():
+                    sentences.append(part.strip() + separator.strip())
+            break
     
-    return chunks[:50]  # Limit chunks for Vercel
+    # If no sentence separators found, split by words
+    if not sentences:
+        words = text.split()
+        sentences = [' '.join(words[i:i+50]) for i in range(0, len(words), 50)]
+    
+    current_chunk = ""
+    
+    for sentence in sentences:
+        # If adding this sentence exceeds chunk_size, save current chunk
+        if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
+            chunks.append(current_chunk.strip())
+            # Start new chunk with overlap from previous chunk
+            overlap_text = current_chunk[-chunk_overlap:] if len(current_chunk) > chunk_overlap else current_chunk
+            current_chunk = overlap_text + " " + sentence
+        else:
+            current_chunk += " " + sentence if current_chunk else sentence
+    
+    # Add the last chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # Limit total chunks for Vercel/free tier
+    if len(chunks) > 30:
+        chunks = chunks[:30]
+    
+    print(f"Split text into {len(chunks)} chunks (chunk_size={chunk_size}, overlap={chunk_overlap})")
+    
+    return chunks
 
 def create_collection(collection_name: str):
     client = get_qdrant_client()
@@ -358,10 +423,10 @@ def upload_file():
             flash('Could not extract text from PDF', 'error')
             return redirect(url_for('index'))
         
-        print(f"Extracted text length: {len(text)} chars")
+        print(f"Extracted text length: {len(text)} characters")
         
-        # Split into chunks
-        chunk_size = int(request.form.get('chunk_size', 500))
+        # Split into chunks with user-specified size
+        chunk_size = int(request.form.get('chunk_size', 600))
         chunks = split_text_simple(text, chunk_size=chunk_size)
         
         if not chunks:
@@ -370,10 +435,15 @@ def upload_file():
         
         print(f"Created {len(chunks)} chunks")
         
+        # Show sample of first few chunks
+        for i, chunk in enumerate(chunks[:3]):
+            print(f"Chunk {i} length: {len(chunk)} chars, preview: {chunk[:100]}...")
+        
         # Limit chunks for free tier
-        if len(chunks) > 20:
-            chunks = chunks[:20]
-            flash(f'Processing first 20 chunks only (free tier limit)', 'warning')
+        if len(chunks) > 30:
+            original_count = len(chunks)
+            chunks = chunks[:30]
+            flash(f'Limited to first 30 chunks (document had {original_count} chunks)', 'warning')
         
         # Create collection and index
         safe_name = secure_filename(file.filename).replace('.pdf', '').replace('.', '_')
@@ -386,9 +456,9 @@ def upload_file():
             if index_chunks(chunks, collection_name):
                 session['collection_name'] = collection_name
                 session['num_chunks'] = len(chunks)
-                flash(f'Successfully indexed {len(chunks)} chunks!', 'success')
+                flash(f'Successfully indexed {len(chunks)} chunks! Average chunk size: {sum(len(c) for c in chunks) // len(chunks)} chars', 'success')
             else:
-                flash('Error indexing chunks. Please check: 1) HuggingFace API key is valid, 2) Model is loaded, 3) Try again in a moment', 'error')
+                flash('Error indexing chunks. Check HuggingFace API key and try again.', 'error')
         else:
             flash('Error creating collection. Check Qdrant connection.', 'error')
             
@@ -459,23 +529,25 @@ def test_embed():
     if not HF_API_KEY:
         return jsonify({'error': 'HF_API_KEY not set'})
     
-    # Test with HuggingFace directly
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json"
+    }
     test_input = "Hello world"
     
     try:
-        print(f"Testing HuggingFace API with URL: {HF_EMBED_URL}")
-        print(f"API Key (first 10 chars): {HF_API_KEY[:10]}...")
+        # Test with HuggingFace Inference API
+        payload = {
+            "inputs": test_input,
+            "options": {"wait_for_model": True}
+        }
         
         response = requests.post(
             HF_EMBED_URL, 
             headers=headers, 
-            json={"inputs": test_input, "options": {"wait_for_model": True}},
+            json=payload,
             timeout=30
         )
-        
-        print(f"Response status: {response.status_code}")
-        print(f"Response text: {response.text[:500]}")
         
         if response.status_code != 200:
             return jsonify({
@@ -483,23 +555,37 @@ def test_embed():
                 'status_code': response.status_code,
                 'error_message': response.text,
                 'url_used': HF_EMBED_URL,
-                'api_key_set': bool(HF_API_KEY),
-                'api_key_prefix': HF_API_KEY[:7] if HF_API_KEY else 'None'
+                'model': HF_MODEL
             })
         
         result = response.json()
-        print(f"Result type: {type(result)}")
-        print(f"Result sample: {str(result)[:200]}")
+        
+        # Extract embedding
+        embedding = None
+        structure = "unknown"
+        
+        if isinstance(result, list):
+            if len(result) > 0:
+                if isinstance(result[0], (int, float)):
+                    embedding = result
+                    structure = "flat"
+                elif isinstance(result[0], list) and len(result[0]) > 0:
+                    if isinstance(result[0][0], (int, float)):
+                        embedding = result[0]
+                        structure = "nested"
+                    elif isinstance(result[0][0], list):
+                        embedding = result[0][0]
+                        structure = "double_nested"
         
         return jsonify({
             'success': True,
             'status_code': response.status_code,
-            'result_type': str(type(result)),
-            'is_list': isinstance(result, list),
-            'length': len(result) if isinstance(result, list) else 'N/A',
-            'first_element_type': str(type(result[0])) if isinstance(result, list) and len(result) > 0 else 'N/A',
-            'first_5_values': result[:5] if isinstance(result, list) else str(result)[:200],
-            'result_sample': str(result)[:500]
+            'structure': structure,
+            'embedding_length': len(embedding) if embedding else 0,
+            'first_5_values': embedding[:5] if embedding else 'N/A',
+            'works': embedding is not None and len(embedding) == 384,
+            'url_used': HF_EMBED_URL,
+            'model': HF_MODEL
         })
     except Exception as e:
         import traceback
@@ -507,8 +593,7 @@ def test_embed():
             'success': False, 
             'error': str(e),
             'traceback': traceback.format_exc(),
-            'hf_url': HF_EMBED_URL,
-            'api_key_set': bool(HF_API_KEY)
+            'url_used': HF_EMBED_URL
         })
 
 @app.route('/debug-upload', methods=['POST'])
@@ -561,4 +646,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
-
