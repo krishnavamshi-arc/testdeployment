@@ -371,7 +371,7 @@ def build_prompt(query: str, contexts: list):
     return (
         f"Context from document:\n{ctx_text}\n\n"
         f"Question: {query}\n\n"
-        f"Answer based context above only. Be concise.\n\n"
+        f"You are a helpful assistant. Answer ONLY using the provided context. If answer is not preset, say you don't know. Answer clearly in 1-3 sentences.\n\n"
         f"Answer:"
     )
 
@@ -646,6 +646,7 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
+
 
 
 
